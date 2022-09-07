@@ -1,0 +1,505 @@
+---
+title: "Seurat analysis of HTO demultiplexed samples"
+author: "Marina Nikolova"
+date: "15/08/2022"
+output: html_document
+---
+
+# Basic setup
+## Prepare the environment
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE)
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Brain_BVOs/")
+
+```
+
+## Load packages
+```{r load packages}
+
+library(Seurat)
+library(tidyverse)
+library(dplyr)
+library(patchwork)
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+
+```
+
+## Read in the data
+```{r reading the data}
+
+# Load the mRNA count matrices
+rep1 <- readRDS("Objects/seurat.rep1.hashtag.rds")
+rep2 <- readRDS("Objects/seurat.rep2.hashtag.rds")
+
+# Set the identities to the HTO ones
+Idents(rep1) <- "hash.ID"
+Idents(rep2) <- "hash.ID"
+
+DefaultAssay(rep1) <- "RNA"
+DefaultAssay(rep2) <- "RNA"
+
+```
+
+# Quality control
+## Detect mitochondira genes, calcualute their percentage and add to metadata
+```{r mitochondria percentage}
+
+rep1[["percent.mt"]] <- PercentageFeatureSet(rep1, pattern = "^MT-")
+head(rep1@meta.data, 5)
+rep2[["percent.mt"]] <- PercentageFeatureSet(rep2, pattern = "^MT-")
+head(rep2@meta.data, 5)
+
+```
+
+## Visualize QC metrics for all datasets
+```{r QC metrics}
+
+# Check number of cells before QC filtering
+
+# Check overall number of genes, transcripts and percentage mitochondira
+VlnPlot(rep1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(rep2, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+```
+
+## Set thresholds to filter out low quality cells or droplets
+```{r set thresholds for QC}
+
+# Number of cells before filtering
+ncol(rep1)  # 16'916 cells
+ncol(rep2)  # 15'570 cells
+ 
+# Filter out cells
+rep1 <- subset(rep1, subset = nFeature_RNA > 500 & nCount_RNA > 1000 & percent.mt < 20)
+rep2 <- subset(rep2, subset = nFeature_RNA > 500 & nCount_RNA > 1000 & percent.mt < 20)
+
+# Number of cells after filtering
+ncol(rep1)  # 15'236 cells
+ncol(rep2)  # 14'101 cells
+ 
+# Check overall number of genes, transcripts and percentage mitochondira
+VlnPlot(rep1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(rep2, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+```
+## Filter negative droplets or those containing doublets (based on HTO assignments)
+```{r remove negatives and doublets}
+
+# Remove "Negative" and "Doublet"
+rep1 <- subset(rep1, subset = hash.ID == "Negative", invert = T)
+rep1 <- subset(rep1, subset = hash.ID == "Doublet", invert = T)
+rep2 <- subset(rep2, subset = hash.ID == "Negative", invert = T)
+rep2 <- subset(rep2, subset = hash.ID == "Doublet", invert = T)
+
+# Check overall number of genes, transcripts and percentage mitochondira
+VlnPlot(rep1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(rep2, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+```
+
+## Save the filtered objects
+```{r save filtered objects}
+
+saveRDS(rep1, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Brain_BVOs/Objects/seurat.rep1.hashtag_filtered.rds")
+saveRDS(rep2, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Brain_BVOs//Objects/seurat.rep2.hashtag_filtered.rds")
+
+```
+
+# Merged analysis
+## Merge the two Seurat objects (both raw and normalized matrices)
+```{r merge Seurat objects}
+
+# set merge.data to TRUE, to keep also the normalized matrices
+seurat <- merge(rep1, rep2, merged.data = TRUE, project = "Brain BVOs")
+
+
+```
+
+## Perform data scaling 
+```{r scale the data}
+
+# There is no need to perform normalization as this has already been done in the script "Demultiplexing_with_HTO.Rmd" (where these objects were created)
+# Data scaling sets the mean gene expression for each gene to 0 and the variance to 1, across cells. Scaling makes gene expression comparable between cells, giving equal weight to all genes in downstream analysis (so that highly expressed genes do not dominate and skew the results)
+
+# Make a vector containing the names of all genes
+all.genes <- rownames(seurat)
+seurat <- FindVariableFeatures(seurat) %>%
+          ScaleData(features = all.genes) %>%
+          RunPCA(npcs = 50)
+
+```
+
+## Examine and visualize PCA results a few different ways
+```{r examine PCS results of the merged object}
+
+# Print the top 5 genes in the top 30 PCs
+print(seurat[["pca"]], dims = 1:30, nfeatures = 5)
+
+# Use a ranking of PCs based on the percentage of variance explained by each one 
+ElbowPlot(seurat, ndims = 50) # In this example, we can observe an ‘elbow’ around PC15, suggesting that the majority of true signal is captured in the first 15 PCs.Overall, the chosen number of PCs does not affect the final results too much and as the results are not so clear, I will choose more PCs here - 30.
+
+# A scatter plots of the PCs, separated by HTO
+DimPlot(seurat, reduction = "pca")
+
+```
+## Cluster the cells and perform non-linear dimension reduction
+```{r cluster the cells of the merged object}
+
+# Find neighbors and clusters
+seurat <- FindNeighbors(seurat, dims = 1:30) %>% 
+          FindClusters(resolution = 0.3) %>% 
+          FindClusters(resolution = 0.5) %>% 
+          FindClusters(resolution = 0.8) %>% 
+          FindClusters(resolution = 1) %>% 
+          FindClusters(resolution = 1.5)
+
+```
+
+```{r non-linear dimension reduction of merged object}
+
+# Run UMAP and TSNE
+seurat <- RunUMAP(seurat, dims = 1:30) 
+
+# Visualize
+DefaultAssay(seurat) <- "RNA"
+Idents(seurat) <- "RNA_snn_res.0.5"
+plot1 <- UMAPPlot(seurat, group.by="orig.ident")
+plot2 <- UMAPPlot(seurat, label = T)
+plot3 <- UMAPPlot(seurat, group.by = "hash.ID")
+plot4 <- FeaturePlot(seurat, c("PECAM1","PDGFRB","SLC2A1","MKI67"), ncol=4, pt.size = 0.1, order = T)
+((plot1 | plot2 | plot3) / plot4) + plot_layout(width = c(1,2))
+
+```
+
+
+## Save the merged object
+```{r save merged object}
+
+saveRDS(seurat, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Brain_BVOs/Objects/seurat.merged.preprocessed.rds")
+
+```
+
+
+# Integrate the two datasets
+
+## Integrate with Harmony
+```{r harmony integration}
+
+# Load the harmony package
+library(harmony)
+
+# Run harmony integrating over multiple covariates - here over the replicate (1 and 2) and the HTO assignemtn
+harmony <- RunHarmony(seurat, group.by.vars = c("hash.ID", "orig.ident"), dims.use = 1:30, max.iter.harmony = 50) %>% 
+          FindNeighbors(reduction = "harmony", dims = 1:30) %>% 
+          FindClusters(resolution = 0.3) %>% 
+          FindClusters(resolution = 0.5) %>% 
+          FindClusters(resolution = 0.8) %>% 
+          FindClusters(resolution = 1) %>% 
+          FindClusters(resolution = 1.5) %>%
+          RunUMAP(reduction = "harmony", dims = 1:30)
+
+# Visualize
+DefaultAssay(harmony) <- "RNA"
+Idents(harmony) <- "RNA_snn_res.0.5"
+
+setwd("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Brain_BVOs/Plots/Seurat_objects_integrated/")
+png("harmony.integrated_seurat.png", width = 40, height = 35, units = "cm", res = 500)
+plot1 <- UMAPPlot(harmony, group.by="orig.ident", reduction = "harmony")
+plot2 <- UMAPPlot(harmony, label = T, reduction = "harmony")
+plot3 <- UMAPPlot(harmony, group.by = "hash.ID", reduction = "harmony")
+plot4 <- FeaturePlot(harmony, c("PECAM1","PDGFRB","SLC2A1","MKI67"), ncol=4, pt.size = 0.1, order = T)
+((plot1 | plot2 | plot3) / plot4) + plot_layout(width = c(1,2))
+dev.off()
+
+harmony$hash.ID <- factor(harmony$hash.ID, levels = c("HTO1", "HTO2", "HTO3", "HTO4", "HTO5","HTO6", "HTO7", "HTO8", "HTO9", "HTO10", "HTO12", "HTO13"))
+
+```
+## Subset endothelial cells only from the Harmony object
+```{r subset EC from Harmony}
+
+harmony_EC <- subset(harmony, idents = c(2,6)) 
+harmony_EC <- FindVariableFeatures(harmony_EC) %>%
+          ScaleData(features = all.genes) %>%
+          RunPCA(npcs = 50) %>%
+          RunHarmony(group.by.vars = c("hash.ID", "orig.ident"), dims.use = 1:30, max.iter.harmony = 50) %>% 
+          FindNeighbors(reduction = "harmony", dims = 1:30) %>% 
+          FindClusters(resolution = 0.5) %>% 
+          RunUMAP(reduction = "harmony", dims = 1:30)
+
+# Visualize
+DefaultAssay(harmony_EC) <- "RNA"
+Idents(harmony_EC) <- "RNA_snn_res.0.5"
+
+setwd("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Brain_BVOs/Plots/Seurat_objects_integrated/")
+png("harmony_EC.integrated_seurat.png", width = 40, height = 35, units = "cm", res = 500)
+plot1 <- UMAPPlot(harmony_EC, group.by="orig.ident", reduction = "harmony")
+plot2 <- UMAPPlot(harmony_EC, label = T, reduction = "harmony")
+plot3 <- UMAPPlot(harmony_EC, group.by = "hash.ID", reduction = "harmony")
+plot4 <- FeaturePlot(harmony_EC, c("PECAM1","PDGFRB","SLC2A1","MKI67"), ncol=4, pt.size = 0.1, order = T)
+((plot1 | plot2 | plot3) / plot4) + plot_layout(width = c(1,2))
+dev.off()
+
+```
+
+## Save the Harmony integrated object
+```{r save harmony object}
+
+saveRDS(harmony, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Brain_BVOs/Objects/seurat.harmony.integrated.rds")
+
+```
+
+## Integrate with CSS
+```{r css integration}
+
+### Integrate only over "hash.ID", because if I try to include "orig.ident", the code fails ###
+# The reason is that upon running clustering on the seurat object after css, I get the following error message:
+  ## Start to do clustering for each sample...
+  ## Warning in xtfrm.data.frame(x) : cannot xtfrm data frames
+  ## Finished clustering.
+  ## Error in which(sapply(cl, function(x) length(levels(x)) < min_cluster_num)) : argument to 'which' is not logical
+# I suspect that the problem is that I try running css for integration over two covariates and it is not clear if the method is capable of this.
+# Integrating over "orig.ident" does not seem necessary as in the UMAP plot one can see that the two replicates intermix well.
+
+# Load the css package
+library(simspec)
+
+# Run css
+css <- cluster_sim_spectrum(seurat, label_tag = c("hash.ID"), cluster_resolution = 0.5, dims_use = 1:30) %>%
+          FindNeighbors(reduction = "css", dims = 1:30) %>%
+          FindClusters(resolution = 0.3) %>%
+          FindClusters(resolution = 0.5) %>%
+          FindClusters(resolution = 0.8) %>%
+          FindClusters(resolution = 1) %>%
+          FindClusters(resolution = 1.5) %>%
+          RunUMAP(reduction = "css", dims = 1:30)
+
+
+# Visualize
+DefaultAssay(css) <- "RNA"
+Idents(css) <- "RNA_snn_res.0.5"
+
+setwd("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Brain_BVOs/Plots/Seurat_objects_integrated/")
+png("css.integrated_seurat.png", width = 40, height = 35, units = "cm", res = 500)
+plot1 <- UMAPPlot(css, group.by="orig.ident", reduction = "umap_css")
+plot2 <- UMAPPlot(css, label = T, reduction = "umap_css")
+plot3 <- UMAPPlot(css, group.by = "hash.ID", reduction = "umap_css")
+plot4 <- FeaturePlot(css, c("PECAM1","PDGFRB","SLC2A1","MKI67"), ncol=4, pt.size = 0.1, order = T)
+((plot1 | plot2 | plot3) / plot4) + plot_layout(width = c(1,2))
+dev.off()
+
+
+css$hash.ID <- factor(css$hash.ID, levels = c("HTO1", "HTO2", "HTO3", "HTO4", "HTO5","HTO6", "HTO7", "HTO8", "HTO9", "HTO10", "HTO12", "HTO13"))
+
+```
+
+## Save the CSS integrated object
+```{r save css object}
+
+saveRDS(css, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Brain_BVOs/Objects/seurat.css.integrated.css")
+
+```
+
+
+# Comaprison to reference datasets
+## Add module score based on annotated reference primary single-cell RNA-seq data
+## Reference dataset BBB atlas - human primary brain cells from (2022) Garica et al., Single-cell dissection of the human brain vasculature, Nature
+```{r load the ref BBB atlas}
+
+# Load the counts 
+ref_counts_BBB <- readRDS("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Published_datasets/2022_Human_BBB_Cell_Atlas/preprocessed/brain.BBB.human.counts.rds")
+
+# Load the metadata for these cells only, which has also more details
+ref_meta_BBB_vasc <- read.table("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Published_datasets/2022_Human_BBB_Cell_Atlas/preprocessed/brain.BBB.human.vascular.final.Jan2022.metadata.txt", header = T,sep = '\t')
+
+```
+
+```{r clean up count matrix}
+
+# The count matrix and metadata do not match - 84'350 cells (columns) in the original count matrix, but only 4'992 cells in the metadata
+# What is more, only 4'980 of those match (intersect)
+# I do not know the reason for this but safest is to keep only the matching cell barcodes (matrix columns) to metadata rownames
+
+# Create a vector of matrix colnames
+a <- ref_counts_BBB@Dimnames[[2]]
+head(a)
+length(a)
+
+# Create a vector of metadata rownames 
+b <- rownames(ref_meta_BBB_vasc)
+head(b)
+length(b)
+
+# Keep only the matching characters
+c <- intersect(a, b)
+head(c)
+length(c)
+
+# Generate a new matrix which contains only the cells (columns) for which we have the metadata
+ref_counts_BBB_vasc <- ref_counts_BBB[, intersect(c, colnames(ref_counts_BBB))]
+
+# Generate a new metadata which contains only the cells (rows) for which we have the metadata
+ref_meta_BBB_vasc <- ref_meta_BBB_vasc[c, ]
+
+```
+
+## Create a Seurat object of the BB reference data which includes only the vascular cells and preprocess it
+```{r create reference BBB Seurat object}
+
+# Create reference Seurat object
+ref_seurat_BBB_vasc <- CreateSeuratObject(ref_counts_BBB_vasc, project = "ref_BBB")
+
+# Add metadata to the object
+ref_seurat_BBB_vasc@meta.data <- ref_meta_BBB_vasc
+
+# Check the object
+View(ref_seurat_BBB_vasc@meta.data) # Only 4'968 cells are annotated as Vascular, but there are 4'992 vascular cells mentioned in the paper and present in the detailed metadata which we add later
+
+# Preprocess the object
+all.genes.ref <- rownames(ref_seurat_BBB_vasc)
+ref_seurat_BBB_vasc <- NormalizeData(ref_seurat_BBB_vasc) %>%
+          FindVariableFeatures() %>%
+          ScaleData(features = all.genes.ref) %>%
+          RunPCA(npcs = 50) %>%
+          RunHarmony("SampleID", max.iter.harmony = 50, dims.use = 1:50) %>% 
+          FindNeighbors(reduction = "harmony", dims = 1:50) %>%
+          FindClusters(resolution = 0.5) %>%
+          RunUMAP(reduction = "harmony", dims = 1:50)
+
+# Visualize whole reference object
+UMAPPlot(ref_seurat_BBB_vasc, group.by = "celltype")
+UMAPPlot(ref_seurat_BBB_vasc, group.by = "cellsubtype")
+UMAPPlot(ref_seurat_BBB_vasc, group.by = "SampleID")
+FeaturePlot(ref_seurat_BBB_vasc, features = c("PECAM1", "CLDN5", "LEF1", "PDGFRB"), order = T)
+
+```
+```{r save reference BBB atlas}
+
+# Save the reference BBB atlas with subset vascular cells only with metadata
+saveRDS(ref_seurat_BBB_vasc, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Published_datasets/2022_Human_BBB_Cell_Atlas/preprocessed/brain.BBB.vasc.human.seurat.rds")
+
+```
+
+
+## Calculate the transcriptome similarity of BBB atlas to brain BVOs
+```{r transcriptome similarity with BBB reference}
+
+# Here we compare the transcriptome profile of each cell population in the query data set, to the transcriptome profiles of different cell types in the reference data set. 
+# The query cell cluster can be then referred to the cell type in the reference data set which shows the highest similarity of transcriptome profiles.
+
+# Calculate the average transcriptome profiles for every annotated cell type in the reference data set and every cell cluster in the query data set.
+avg_expr_ref_BBB_vasc <- sapply(sort(unique(ref_seurat_BBB_vasc$cellsubtype)), function(ct) 
+                              rowMeans(ref_seurat_BBB_vasc@assays$RNA@data[,which(ref_seurat_BBB_vasc$cellsubtype == ct)] ))
+
+
+# First for the ECs
+avg_expr_harmony <- sapply(sort(unique(harmony_EC$hash.ID)), function(ct) 
+                              rowMeans(harmony_EC@assays$RNA@data[,which(harmony_EC$hash.ID == ct)] ))
+
+# Get the genes to represent transcriptome and calculate pairwise Spearman correlation across those genes' average expression between reference cell types and query clusters.
+genes2cor <- intersect(VariableFeatures(ref_seurat_BBB_vasc), 
+                       rownames(harmony_EC))
+corr2ref_cl <- cor(avg_expr_harmony[genes2cor,], 
+                   avg_expr_ref_BBB_vasc[genes2cor,], 
+                   method="spearman")
+# In the output matrix of the cor function, different entries (columns) of the first input matrix are represented by rows, and those of the second input matrix are represented by columns. In this case, every row in the correlation matrix is one cluster in the query data set, and every column is one cell type in the reference data set.
+
+library(gplots)
+heatmap.2(corr2ref_cl, 
+          Rowv=FALSE, 
+          scale="none", 
+          trace="none", 
+          key=F, 
+          keysize=0.5, 
+          margins=c(15,17),
+          labRow = colnames(avg_expr_harmony), 
+          labCol = colnames(avg_expr_ref_BBB_vasc), 
+          cexRow=0.8, 
+          cexCol=0.8,
+          col=colorRampPalette(rev(c("#b2182b","#d6604d","#f4a582","#fddbc7","#f7f7f7","#d1e5f0","#92c5de","#4393c3","#2166ac")))(30))
+
+
+# Do the same for the mural cells
+harmony_mural <- subset(harmony, idents = c(2,6), invert = T)
+harmony_mural <- FindVariableFeatures(harmony_mural)
+avg_expr_harmony <- sapply(sort(unique(harmony_mural$hash.ID)), function(ct) 
+                              rowMeans(harmony_mural@assays$RNA@data[,which(harmony_mural$hash.ID == ct)] ))
+
+# Get the genes to represent transcriptome and calculate pairwise Spearman correlation across those genes' average expression between reference cell types and query clusters.
+genes2cor <- intersect(VariableFeatures(ref_seurat_BBB_vasc), 
+                       rownames(harmony_mural))
+corr2ref_cl <- cor(avg_expr_harmony[genes2cor,], 
+                   avg_expr_ref_BBB_vasc[genes2cor,], 
+                   method="spearman")
+
+heatmap.2(corr2ref_cl, 
+          Rowv=F,
+          scale="none", 
+          trace="none", 
+          key=F, 
+          keysize=0.5, 
+          margins=c(15,17),
+          labRow = colnames(avg_expr_harmony), 
+          labCol = colnames(avg_expr_ref_BBB_vasc), 
+          cexRow=0.8, 
+          cexCol=0.8,
+          col=colorRampPalette(rev(c("#b2182b","#d6604d","#f4a582","#fddbc7","#f7f7f7","#d1e5f0","#92c5de","#4393c3","#2166ac")))(30))
+
+
+```
+
+## Try label transfer by Seurat 
+```{r Seurat-based label transfer}
+
+anchors <- FindTransferAnchors(reference = ref_seurat_BBB_vasc, query = harmony, dims = 1:30, npcs = 30, k.filter = NA)
+predictions <- TransferData(anchorset = anchors, refdata = ref_seurat_BBB_vasc$cellsubtype, dims = 1:30)
+harmony$celltype_transfer <- predictions$predicted.id
+
+plot1 <- UMAPPlot(harmony, reduction = "harmony", group.by = "RNA_snn_res.0.5", label = F, label.size = 4, repel = T, pt.size = 0.6) & NoAxes()
+plot2 <- UMAPPlot(harmony, group.by="celltype_transfer", label=T)
+plot3 <- DimPlot(ref_seurat_BBB_vasc, group.by="cellsubtype",  label=T)
+
+plot1 | plot2
+plot2 | plot3
+
+```
+
+## Reference dataset Cao fetal atlas - human primary fetal cells from (2021) Cao et al.
+```{r load Cao reference endothelial cells}
+
+fetal_endo_organs <- readRDS("/links/groups/treutlein/USERS/zhisong_he/Work/public_datasets/Cao_Science_2020_fetal_human_atlas_scRNAseq/processed_datasets/endothelial.seurat.RDS")
+
+```
+
+## Calculate module scores for feature expression programs in single cells 
+```{r add module scores}
+
+# Here we use the Seurat function AddModuleScore to calculate the average expression levels of each program (cluster) on single cell level, subtracted by the aggregated expression of control feature sets. 
+# All analyzed features are binned based on averaged expression, and the control features are randomly selected from each bin.
+Idents(fetal_endo_organs) <- "Organ"
+UMAPPlot(fetal_endo_organs, reduction = "umap_css")
+# Get the top 50 genes expressed 
+all_markers_fetal_endo_organs <- FindMarkers(fetal_endo_organs, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) %>%
+  arrange(-avg_log2FC) %>%
+  rownames_to_column(var = "gene") %>%
+  pull(gene) %>% 
+  .[1:50]
+
+harmony_EC <- AddModuleScore(harmony_EC,
+                  features = list(nk_enriched),
+                  name="NK_enriched")
+
+# Plot scores
+FeaturePlot(harmony_EC,
+            features = "NK_enriched1", label = TRUE, repel = TRUE) +
+            scale_colour_gradientn(colours = rev(brewer.pal(n = 11, name = "RdBu")))
+
+all_markers_fetal_endo_organs <- all_markers_fetal_endo_organs[order(-all_markers_fetal_endo_organs$avg_logFC),]
+all_markers_fetal_endo_organs <- all_markers_fetal_endo_organs[order(all_markers_fetal_endo_organs$Organ),] 
+all_markers_fetal_endo_organs %>% group_by(Organ) %>% top_n(n = 50, wt = avg_logFC)
+all_markers_fetal_endo_organs
+
+```
+
